@@ -1,0 +1,45 @@
+Fix grade estimation
+
+Ubuntu 20.04, lets say 24.04 and MacOS (newest)
+
+Does it really require a master key of 512 bits? I thought we said differently, I actually think this is right
+
+System does not REQUIRE Linux, but likely requires unix. We say python 3.7 an dup in some and Python 3.9 in some.
+
+What is MTU again?
+
+"Semantic seurity was preserved throughout testing, confirming that identical plaintexts consistently producted different cyphertexts" Use a def for semantic security or rewrite
+
+Were all these tests really perfect?? What are we testing?
+
+Did we actually test SSH, http, etc?
+
+How did we test network degradation?
+
+Sliding Window Mechanism? What is that? But packet reordering is a good catch
+
+I do support MacOS
+
+Last paragraph of what can we do better is very wordy
+
+After that is also very wordy. Fix that
+
+Dont say that anything presented high difficulty. -> not hard to understand implications of IV reuse
+
+Concepts reinforced might not be needed, if kept, make it breif.
+
+STOP TALKING ABOUT IV reuse. Dont need Key Technical insights.
+
+I swear, in software engineering lessons we talk about catchin gth eIV reuse bug, and use em dashes. Lets not do that.
+
+WE DO NOT have teh complete implementation of the VPN.
+
+Flow Charts are great but are cut off between pages, maybe remake with freeform
+
+Great addition of estimated grade lmfao
+
+All in all, good, but very repetitive, lets fix it.
+
+Check sources are correct
+
+

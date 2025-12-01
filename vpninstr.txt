@@ -1,0 +1,55 @@
+Description – VPN
+Design and implement a Virtual Private Network (VPN) that allows two or more hosts to communicate
+securely over an untrusted network. Students must use tunneling, encryption, and authentication techniques
+to create a working VPN solution.
+CS462 Computer Networks
+Evaluation Criteria – VPN
+% Category Explanation
+20 VPN Core Functionality VPN allows for communication
+between hosts
+20 Encryption and Authentication Communication between hosts
+implements strong encryption and
+authentication measures (AES,
+TLS...)
+20 Tunneling and Protocols Packets sent must be properly
+encapsulated (UDP, IPv4...)
+10 Security Analysis and Testing Tests must be performed to ensure
+CIA even after the VPN is attacked
+10 Performance and Scalability Compare VPN traffic vs non-VPN
+traffic (latency, throughput, RTT)
+10 Report & Documentation Report includes diagram,
+architecture, test results, description
+of the system and a HOW-TO section
+to utilize it
+10 Final Presentation
+CS462 Computer Networks
+Deliverables
+• Create a formal Project Report that follows the defined report document format (below).
+• Presentation of the project will be at the end of November on dates specified by Professor Juan.
+Report Document Format (no formal software requirement specification necessary)
+Report Cover Page (title, class, group ID, student names, semester, instructor)
+Table of Contents (and revision history table)
+Section 1 – Organization: present effort of each student in the project. For that you can follow the example
+table below.
+Version Date Modifier Description
+1.0
+Section 2 – Objectives and System Specification: a broad description of what you were trying to
+accomplish, including a simplified requirement specification section formalizing the
+requirements detailed below in the assignment section.
+Section 3 – Operation Manual and Analysis
+a. Describe how to make the system work given the source code.
+b. Make an attempt to provide more formal scheduling analysis of the tasks timing behavior.
+Section 5 – Observations and Comments
+c. Observations – Did the system behave as expected? Comment on timing behavior of the system.
+d. Comments – Comment on your process and experience in developing your solution. What could
+you have done better?
+Section 6 – Lessons Learned
+e. How difficult was it to use the concepts – were you successful?
+f. What computer networks concepts were enforced by your execution of this project?
+Appendix A – Source Code: modular and well commented
+Appendix B – Test Cases: some basic, functional test cases; you can follow example simple format show
+below.
+Step Action Expected Behavior Pass/Fail
+1
+2
+

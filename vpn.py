@@ -23,69 +23,93 @@ MTU = 1500
 
 class VPNPacket:
     """
-    VPN Packet Format:
-    [4 bytes: sequence number][32 bytes: HMAC][N bytes: encrypted payload]
+    VPN Packet Format (FIXED - Now includes unique IV per packet):
+    [16 bytes: IV][4 bytes: sequence number][32 bytes: HMAC][N bytes: encrypted payload]
+
+    Security improvements:
+    - Unique IV generated for each packet (prevents CTR mode attacks)
+    - HMAC covers IV + header + encrypted payload (prevents tampering)
+    - Sequence numbers prevent replay attacks
     """
+    IV_SIZE = 16
     HEADER_SIZE = 4
     HMAC_SIZE = 32
-    
+
     def __init__(self, seq_num, payload):
         self.seq_num = seq_num
         self.payload = payload
-    
-    def pack(self, cipher, hmac_key):
-        """Encrypt and pack the packet"""
-        # Encrypt payload
+
+    def pack(self, encryption_key, hmac_key):
+        """Encrypt and pack the packet with a unique IV"""
+        # Generate NEW IV for THIS packet (fixes CTR mode security)
+        iv = os.urandom(16)
+
+        # Create cipher with the new IV
+        cipher = Cipher(
+            algorithms.AES(encryption_key),
+            modes.CTR(iv),
+            backend=default_backend()
+        )
         encryptor = cipher.encryptor()
+
         # Pad payload to multiple of 16 bytes (AES block size)
         padding_length = 16 - (len(self.payload) % 16)
         padded_payload = self.payload + bytes([padding_length] * padding_length)
         encrypted_payload = encryptor.update(padded_payload) + encryptor.finalize()
-        
+
         # Create header
         header = struct.pack('!I', self.seq_num)
-        
-        # Calculate HMAC over header + encrypted payload
+
+        # Calculate HMAC over IV + header + encrypted payload
         h = hmac.HMAC(hmac_key, hashes.SHA256(), backend=default_backend())
-        h.update(header + encrypted_payload)
+        h.update(iv + header + encrypted_payload)
         hmac_value = h.finalize()
-        
-        return header + hmac_value + encrypted_payload
-    
+
+        # Return: IV + header + HMAC + encrypted_payload
+        return iv + header + hmac_value + encrypted_payload
+
     @staticmethod
-    def unpack(data, cipher, hmac_key, expected_seq):
+    def unpack(data, encryption_key, hmac_key, expected_seq):
         """Unpack and decrypt the packet"""
-        if len(data) < VPNPacket.HEADER_SIZE + VPNPacket.HMAC_SIZE:
+        min_size = VPNPacket.IV_SIZE + VPNPacket.HEADER_SIZE + VPNPacket.HMAC_SIZE
+        if len(data) < min_size:
             raise ValueError("Packet too short")
-        
+
         # Extract components
-        header = data[:VPNPacket.HEADER_SIZE]
-        received_hmac = data[VPNPacket.HEADER_SIZE:VPNPacket.HEADER_SIZE + VPNPacket.HMAC_SIZE]
-        encrypted_payload = data[VPNPacket.HEADER_SIZE + VPNPacket.HMAC_SIZE:]
-        
+        iv = data[:VPNPacket.IV_SIZE]
+        header = data[VPNPacket.IV_SIZE:VPNPacket.IV_SIZE + VPNPacket.HEADER_SIZE]
+        hmac_start = VPNPacket.IV_SIZE + VPNPacket.HEADER_SIZE
+        received_hmac = data[hmac_start:hmac_start + VPNPacket.HMAC_SIZE]
+        encrypted_payload = data[hmac_start + VPNPacket.HMAC_SIZE:]
+
         # Verify HMAC
         h = hmac.HMAC(hmac_key, hashes.SHA256(), backend=default_backend())
-        h.update(header + encrypted_payload)
+        h.update(iv + header + encrypted_payload)
         try:
             h.verify(received_hmac)
         except Exception:
             raise ValueError("HMAC verification failed - packet may be tampered")
-        
+
         # Extract sequence number
         seq_num = struct.unpack('!I', header)[0]
-        
+
         # Check for replay attacks
         if seq_num <= expected_seq:
             raise ValueError(f"Replay attack detected: received seq {seq_num}, expected > {expected_seq}")
-        
-        # Decrypt payload
+
+        # Create cipher with extracted IV
+        cipher = Cipher(
+            algorithms.AES(encryption_key),
+            modes.CTR(iv),
+            backend=default_backend()
+        )
         decryptor = cipher.decryptor()
         padded_payload = decryptor.update(encrypted_payload) + decryptor.finalize()
-        
+
         # Remove padding
         padding_length = padded_payload[-1]
         payload = padded_payload[:-padding_length]
-        
+
         return VPNPacket(seq_num, payload)
 
 
@@ -104,15 +128,7 @@ class VPN:
         # Derive encryption and HMAC keys from master key
         self.encryption_key = self.key[:32]  # 256-bit key for AES
         self.hmac_key = self.key[32:64] if len(self.key) >= 64 else self.key[:32]
-        
-        # Initialize cipher (using CTR mode for stream encryption)
-        self.iv = os.urandom(16)
-        self.cipher = Cipher(
-            algorithms.AES(self.encryption_key),
-            modes.CTR(self.iv),
-            backend=default_backend()
-        )
-        
+
         # Sequence numbers for replay protection
         self.send_seq = 0
         self.recv_seq = 0
@@ -175,19 +191,19 @@ class VPN:
         try:
             # Read IP packet from TUN
             packet = os.read(self.tun, MTU)
-            
+
             # Create VPN packet
             self.send_seq += 1
             vpn_packet = VPNPacket(self.send_seq, packet)
-            
-            # Encrypt and pack
-            encrypted_data = vpn_packet.pack(self.cipher, self.hmac_key)
-            
+
+            # Encrypt and pack (generates new IV for each packet)
+            encrypted_data = vpn_packet.pack(self.encryption_key, self.hmac_key)
+
             # Send over UDP
             self.sock.sendto(encrypted_data, (self.remote_ip, self.remote_port))
-            
+
             print(f"[→] Sent packet #{self.send_seq}, size: {len(packet)} bytes")
-        
+
         except Exception as e:
             print(f"[-] Error handling TUN packet: {e}")
     
@@ -196,16 +212,16 @@ class VPN:
         try:
             # Receive encrypted packet
             data, addr = self.sock.recvfrom(65535)
-            
-            # Unpack and decrypt
-            vpn_packet = VPNPacket.unpack(data, self.cipher, self.hmac_key, self.recv_seq)
+
+            # Unpack and decrypt (extracts IV from packet)
+            vpn_packet = VPNPacket.unpack(data, self.encryption_key, self.hmac_key, self.recv_seq)
             self.recv_seq = vpn_packet.seq_num
-            
+
             # Write decrypted IP packet to TUN
             os.write(self.tun, vpn_packet.payload)
-            
+
             print(f"[←] Received packet #{vpn_packet.seq_num}, size: {len(vpn_packet.payload)} bytes")
-        
+
         except ValueError as e:
             print(f"[!] Security error: {e}")
         except Exception as e:
