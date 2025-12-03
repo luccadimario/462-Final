@@ -10,16 +10,24 @@ import struct
 import socket
 import select
 import fcntl
+import platform
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.backends import default_backend
 import argparse
 
-# Constants
+# Constants for Linux
 TUNSETIFF = 0x400454ca
 IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000
 MTU = 1500
+
+# Constants for macOS utun
+CTLIOCGINFO = 0xc0644e03  # ioctl to get kernel control info
+SYSPROTO_CONTROL = 2
+AF_SYS_CONTROL = 2
+PF_SYSTEM = 32
+UTUN_CONTROL_NAME = b"com.apple.net.utun_control"
 
 class VPNPacket:
     """
@@ -122,7 +130,7 @@ class VPN:
         self.remote_port = remote_port
         self.tun_local = tun_local
         self.tun_remote = tun_remote
-        
+
         # Cryptographic setup
         self.key = key.encode() if isinstance(key, str) else key
         # Derive encryption and HMAC keys from master key
@@ -132,38 +140,110 @@ class VPN:
         # Sequence numbers for replay protection
         self.send_seq = 0
         self.recv_seq = 0
-        
+
+        # Platform detection
+        self.platform = platform.system()
+        self.tun_name = None  # Will be set by create_tun()
+
         # Create TUN interface
         self.tun = self.create_tun()
-        
+
         # Create UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.local_ip, self.local_port))
-        
+
         print(f"[+] VPN initialized in {mode} mode")
         print(f"[+] Listening on {self.local_ip}:{self.local_port}")
         print(f"[+] TUN interface: {self.tun_local} <-> {self.tun_remote}")
     
     def create_tun(self):
-        """Create and configure TUN interface"""
+        """Create and configure TUN interface (cross-platform)"""
         try:
-            tun = os.open("/dev/net/tun", os.O_RDWR)
-            ifr = struct.pack('16sH', b'tun0', IFF_TUN | IFF_NO_PI)
-            fcntl.ioctl(tun, TUNSETIFF, ifr)
-            
-            # Configure interface
-            os.system(f'ip addr add {self.tun_local}/24 dev tun0')
-            os.system('ip link set dev tun0 up')
-            
-            # Add route to remote network through TUN
-            os.system(f'ip route add {self.tun_remote}/32 dev tun0')
-            
-            print(f"[+] TUN interface created: tun0")
-            return tun
+            if self.platform == 'Darwin':  # macOS
+                return self._create_tun_macos()
+            elif self.platform == 'Linux':
+                return self._create_tun_linux()
+            else:
+                raise OSError(f"Unsupported platform: {self.platform}")
         except Exception as e:
             print(f"[-] Error creating TUN interface: {e}")
             print("[!] Make sure you run this with sudo/root privileges")
             sys.exit(1)
+
+    def _create_tun_macos(self):
+        """Create and configure utun interface on macOS (built-in, no drivers needed)"""
+        # Try to create a utun interface by trying different unit numbers
+        tun = None
+        ctl_id = None
+        unit_number = None
+
+        # First, get the kernel control ID for utun
+        temp_sock = socket.socket(PF_SYSTEM, socket.SOCK_DGRAM, SYSPROTO_CONTROL)
+        ctl_info = struct.pack('I96s', 0, UTUN_CONTROL_NAME)
+        ctl_info = fcntl.ioctl(temp_sock.fileno(), CTLIOCGINFO, ctl_info)
+        ctl_id = struct.unpack('I96s', ctl_info)[0]
+        temp_sock.close()
+
+        # Try to connect to utun devices (unit numbers 1-16 correspond to utun0-utun15)
+        for unit in range(1, 17):
+            try:
+                tun = socket.socket(PF_SYSTEM, socket.SOCK_DGRAM, SYSPROTO_CONTROL)
+                # Python socket.connect() expects (id, unit) tuple for PF_SYSTEM
+                # Unit N creates utun(N-1), so unit 1 = utun0, unit 2 = utun1, etc.
+                tun.connect((ctl_id, unit))
+                unit_number = unit
+                self.tun_name = f'utun{unit - 1}'
+                print(f"[+] Created utun interface: {self.tun_name}")
+                break
+            except OSError as e:
+                if tun:
+                    tun.close()
+                tun = None
+                continue
+
+        if tun is None:
+            raise OSError("Could not create utun interface (tried utun0-utun15)")
+
+        # Get the file descriptor for use with os.read/write
+        tun_fd = tun.fileno()
+
+        # Configure interface using ifconfig
+        # macOS utun format: ifconfig utunX <local_ip> <remote_ip> up
+        cmd = f'ifconfig {self.tun_name} {self.tun_local} {self.tun_remote} up'
+        result = os.system(cmd)
+        if result != 0:
+            raise OSError(f"Failed to configure interface with: {cmd}")
+
+        # Add route to remote host through utun interface
+        cmd = f'route add -host {self.tun_remote} -interface {self.tun_name}'
+        result = os.system(cmd)
+        if result != 0:
+            print(f"[!] Warning: Failed to add route: {cmd}")
+
+        print(f"[+] utun interface configured: {self.tun_name}")
+        print(f"[+] Local: {self.tun_local}, Remote: {self.tun_remote}")
+
+        # Return the file descriptor (not the socket object)
+        # Store the socket object to prevent it from being garbage collected
+        self._tun_socket = tun
+        return tun_fd
+
+    def _create_tun_linux(self):
+        """Create and configure TUN interface on Linux"""
+        tun = os.open("/dev/net/tun", os.O_RDWR)
+        ifr = struct.pack('16sH', b'tun0', IFF_TUN | IFF_NO_PI)
+        fcntl.ioctl(tun, TUNSETIFF, ifr)
+        self.tun_name = 'tun0'
+
+        # Configure interface
+        os.system(f'ip addr add {self.tun_local}/24 dev tun0')
+        os.system('ip link set dev tun0 up')
+
+        # Add route to remote network through TUN
+        os.system(f'ip route add {self.tun_remote}/32 dev tun0')
+
+        print(f"[+] TUN interface created: tun0")
+        return tun
     
     def run(self):
         """Main VPN loop"""
@@ -192,6 +272,14 @@ class VPN:
             # Read IP packet from TUN
             packet = os.read(self.tun, MTU)
 
+            # macOS utun adds a 4-byte protocol header (AF_INET/AF_INET6)
+            # We need to strip it before encrypting
+            if self.platform == 'Darwin':
+                if len(packet) < 4:
+                    return
+                # Skip the 4-byte protocol family header
+                packet = packet[4:]
+
             # Create VPN packet
             self.send_seq += 1
             vpn_packet = VPNPacket(self.send_seq, packet)
@@ -217,8 +305,24 @@ class VPN:
             vpn_packet = VPNPacket.unpack(data, self.encryption_key, self.hmac_key, self.recv_seq)
             self.recv_seq = vpn_packet.seq_num
 
+            # macOS utun requires a 4-byte protocol family header
+            # Determine protocol family from IP version (first 4 bits of first byte)
+            if self.platform == 'Darwin':
+                ip_version = (vpn_packet.payload[0] >> 4) if len(vpn_packet.payload) > 0 else 4
+                if ip_version == 4:
+                    protocol_family = struct.pack('!I', socket.AF_INET)  # 2 in network byte order
+                elif ip_version == 6:
+                    protocol_family = struct.pack('!I', socket.AF_INET6)  # 30 in network byte order
+                else:
+                    protocol_family = struct.pack('!I', socket.AF_INET)  # Default to IPv4
+
+                # Prepend protocol family header
+                packet_to_write = protocol_family + vpn_packet.payload
+            else:
+                packet_to_write = vpn_packet.payload
+
             # Write decrypted IP packet to TUN
-            os.write(self.tun, vpn_packet.payload)
+            os.write(self.tun, packet_to_write)
 
             print(f"[←] Received packet #{vpn_packet.seq_num}, size: {len(vpn_packet.payload)} bytes")
 
@@ -228,10 +332,19 @@ class VPN:
             print(f"[-] Error handling network packet: {e}")
     
     def cleanup(self):
-        """Clean up resources"""
-        os.close(self.tun)
+        """Clean up resources (cross-platform)"""
+        if self.platform == 'Darwin':  # macOS
+            # Close the utun socket
+            if hasattr(self, '_tun_socket'):
+                self._tun_socket.close()
+            # Bring interface down and remove route
+            os.system(f'ifconfig {self.tun_name} down')
+            os.system(f'route delete -host {self.tun_remote}')
+        else:  # Linux
+            os.close(self.tun)
+            os.system(f'ip link set dev {self.tun_name} down')
+
         self.sock.close()
-        os.system('ip link set dev tun0 down')
         print("[+] Cleanup complete")
 
 
